@@ -46,16 +46,32 @@ public class ArrowVectorizedBatchConverter extends ArrowBatchConverter {
         super(root, fieldWriters);
     }
 
+    /**
+     * 将当前批次的数据写入目标位置
+     *
+     * @param maxBatchRows 每批次允许写入的最大行数。实际写入行数取该值与剩余未处理行数的最小值
+     *     <p>函数逻辑： 1. 计算本次实际需要写入的行数 2. 遍历所有列向量，通过对应的字段写入器进行数据写入 3. 更新根节点的行计数 4.
+     *     维护写入进度索引，当所有数据处理完成后释放迭代器资源
+     */
     @Override
     public void doWrite(int maxBatchRows) {
+        // 计算本批次实际写入行数（不超过剩余待处理行数）
         int batchRows = Math.min(maxBatchRows, totalNumRows - startIndex);
+
+        // 获取当前批次的所有列向量并进行遍历处理
         ColumnVector[] columns = batch.columns;
         for (int i = 0; i < columns.length; i++) {
+            // 调用对应字段的写入器执行具体列数据写入
             fieldWriters[i].write(columns[i], pickedInColumn, startIndex, batchRows);
         }
+
+        // 更新根节点的行计数为本次实际写入行数
         root.setRowCount(batchRows);
 
+        // 维护写入进度索引
         startIndex += batchRows;
+
+        // 当全部数据处理完成时释放迭代器资源
         if (startIndex >= totalNumRows) {
             releaseIterator();
         }

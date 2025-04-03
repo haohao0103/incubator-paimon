@@ -47,6 +47,9 @@ import java.util.stream.IntStream;
  * column. Compared to the SQL standard, an optional field description simplifies the handling with
  * complex structures.
  *
+ * 表示由多个字段组成的数据结构（类似数据库表的行结构）
+ * 每个字段包含三个要素：字段名 + 数据类型 + 可选描述
+ *
  * @since 0.4.0
  */
 @Public

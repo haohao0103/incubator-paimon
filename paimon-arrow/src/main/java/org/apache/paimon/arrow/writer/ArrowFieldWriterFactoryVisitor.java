@@ -144,9 +144,19 @@ public class ArrowFieldWriterFactoryVisitor implements DataTypeVisitor<ArrowFiel
         throw new UnsupportedOperationException("Doesn't support VariantType.");
     }
 
+    /**
+     * 为指定数组类型生成对应的Arrow字段写入器工厂。
+     *
+     * @param arrayType 需要处理的数组类型，包含元素类型信息
+     * @return ArrowFieldWriterFactory 根据数组类型创建的写入器工厂，该工厂能生成处理ListVector的ArrayWriter实例
+     */
     @Override
     public ArrowFieldWriterFactory visit(ArrayType arrayType) {
+        // 递归处理数组元素类型，获取元素类型的写入器工厂
         ArrowFieldWriterFactory elementWriterFactory = arrayType.getElementType().accept(this);
+
+        // 返回lambda表达式，用于延迟创建ArrayWriter实例
+        // 当fieldVector实际注入时，通过元素写入器工厂创建对应的数据向量写入器
         return fieldVector ->
                 new ArrowFieldWriters.ArrayWriter(
                         fieldVector,

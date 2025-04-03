@@ -210,32 +210,44 @@ public class ArrowBatchConverterTest {
         }
     }
 
+    /**
+     * 测试数组类型(ARRAY<STRING>)的序列化与反序列化处理逻辑
+     *
+     * <p>测试流程： 1. 构建包含可空字符串数组的RowType数据结构 2. 生成随机测试数据（包含正常数据和空值场景） 3. 使用Arrow格式进行数据序列化和反序列化 4.
+     * 验证数据转换的正确性和一致性
+     *
+     * @throws Exception 当测试过程中出现未预期的异常时抛出
+     */
     @TestTemplate
     public void testArrayType() throws Exception {
         testDv(false);
-        // build RowType
+
+        /* 构建测试数据结构：包含可空字符串数组的RowType */
         boolean nullable = RND.nextBoolean();
         RowType nestedArrayType =
                 RowType.builder()
                         .field("string_array", DataTypes.ARRAY(DataTypes.STRING()).copy(nullable))
                         .build();
 
-        // create InternalRows
+        /* 生成随机测试数据：5-9行数据，每行可能包含空值或随机长度的字符串数组 */
         int numRows = RND.nextInt(5) + 5;
         List<List<String>> expectedStrings = new ArrayList<>(numRows);
         List<InternalRow> rows = new ArrayList<>(numRows);
         for (int i = 0; i < numRows; i++) {
+            // 生成空值场景数据（当字段允许空值时）
             if (nullable && RND.nextBoolean()) {
                 expectedStrings.add(null);
                 rows.add(GenericRow.of((Object) null));
                 continue;
             }
 
+            /* 生成包含随机长度字符串数组的正常数据 */
             int currentSize = RND.nextInt(5);
             List<String> currentStringArray =
                     IntStream.range(0, currentSize)
                             .mapToObj(idx -> StringUtils.getRandomString(RND, 1, 10))
                             .collect(Collectors.toList());
+            // 将Java字符串转换为BinaryString格式的GenericArray
             GenericArray array =
                     new GenericArray(
                             currentStringArray.stream().map(BinaryString::fromString).toArray());
@@ -243,18 +255,28 @@ public class ArrowBatchConverterTest {
             expectedStrings.add(currentStringArray);
         }
 
+        /* 创建并返回记录迭代器用于读取存储表中的数据 */
         RecordReader.RecordIterator<InternalRow> iterator =
                 getRecordIterator(nestedArrayType, rows, null, testMode.equals("per_row"));
         try (RootAllocator allocator = new RootAllocator()) {
+            // 创建arrow表级容器
             VectorSchemaRoot vsr = ArrowUtils.createVectorSchemaRoot(nestedArrayType, allocator);
+
+            //  创建arrow写入器
             ArrowBatchConverter arrowWriter = createArrowWriter(iterator, nestedArrayType, vsr);
+            // 实现数据的写入
             arrowWriter.next(numRows);
+
+            /* 验证基础元数据 */
             assertThat(vsr.getRowCount()).isEqualTo(numRows);
 
+            /* 验证字段向量内容 */
             List<FieldVector> fieldVectors = vsr.getFieldVectors();
             assertThat(fieldVectors.size()).isEqualTo(1);
             FieldVector fieldVector = fieldVectors.get(0);
             assertThat(fieldVector.getName()).isEqualTo("string_array");
+
+            /* 逐行验证数据一致性 */
             for (int i = 0; i < numRows; i++) {
                 Object obj = fieldVector.getObject(i);
                 List<String> expected = expectedStrings.get(i);
@@ -824,26 +846,43 @@ public class ArrowBatchConverterTest {
         }
     }
 
+    /**
+     * 创建并返回记录迭代器用于读取存储表中的数据
+     *
+     * @param rowType 行数据类型描述
+     * @param rows 要写入的原始数据行集合
+     * @param projection 列投影数组(可选)，用于指定需要读取的列索引，null表示全列
+     * @param canTestParquet 是否允许测试Parquet格式，true时会随机选择Parquet/ORC格式
+     * @return 包含读取结果的记录迭代器
+     * @throws Exception 可能抛出IO操作或数据格式相关的异常
+     */
     private RecordReader.RecordIterator<InternalRow> getRecordIterator(
             RowType rowType,
             List<InternalRow> rows,
             @Nullable int[] projection,
             boolean canTestParquet)
             throws Exception {
+        // 配置存储格式选项：当允许测试Parquet时随机选择Parquet/ORC，否则固定ORC格式
         Map<String, String> options = new HashMap<>();
         options.put(
                 CoreOptions.FILE_FORMAT.key(),
                 canTestParquet && RND.nextBoolean() ? "parquet" : "orc");
+
+        // 创建具有指定格式的文件存储表
         FileStoreTable table = createFileStoreTable(rowType, Collections.emptyList(), options);
 
+        // 初始化写入器并配置IO管理器
         StreamTableWrite write = table.newStreamWriteBuilder().newWrite();
         write.withIOManager(new IOManagerImpl(tempDir.toString()));
         StreamTableCommit commit = table.newStreamWriteBuilder().newCommit();
+
+        // 批量写入所有数据行并提交事务
         for (InternalRow row : rows) {
             write.write(row);
         }
         commit.commit(0, write.prepareCommit(false, 0));
 
+        // 创建带投影的读取器并返回批量读取结果
         return table.newRead()
                 .withProjection(projection)
                 .createReader(table.newReadBuilder().newScan().plan())
@@ -902,22 +941,37 @@ public class ArrowBatchConverterTest {
         return (FileStoreTable) catalog.getTable(identifier);
     }
 
+    /**
+     * 根据当前测试模式创建对应的 Arrow 批量转换器。
+     *
+     * @param iterator 记录迭代器，用于提供输入数据行。根据不同的测试模式可能需要适配子类类型
+     * @param rowType 行数据类型定义，描述输入数据的结构信息
+     * @param vsr Arrow 向量化数据容器，用于承载最终生成的 Arrow 格式数据
+     * @return 返回适用于当前测试模式的批量转换器实例： - vectorized_without_dv: 向量化无删除向量模式 - vectorized_with_dv:
+     *     向量化带删除向量模式 - 其他情况: 逐行处理模式
+     */
     private ArrowBatchConverter createArrowWriter(
             RecordReader.RecordIterator<InternalRow> iterator,
             RowType rowType,
             VectorSchemaRoot vsr) {
+        // 根据目标 Schema 创建对应的字段写入器数组
         ArrowFieldWriter[] fieldWriters = ArrowUtils.createArrowFieldWriters(vsr, rowType);
+
+        /* 根据测试模式选择具体的转换器实现 */
         if (testMode.equals("vectorized_without_dv")) {
+            // 向量化批处理转换器（无删除向量处理）
             ArrowVectorizedBatchConverter batchWriter =
                     new ArrowVectorizedBatchConverter(vsr, fieldWriters);
             batchWriter.reset((VectorizedRecordIterator) iterator);
             return batchWriter;
         } else if (testMode.equals("vectorized_with_dv")) {
+            // 向量化批处理转换器（支持删除向量处理）
             ArrowVectorizedBatchConverter batchWriter =
                     new ArrowVectorizedBatchConverter(vsr, fieldWriters);
             batchWriter.reset((ApplyDeletionFileRecordIterator) iterator);
             return batchWriter;
         } else {
+            // 默认使用逐行处理的转换器实现
             ArrowPerRowBatchConverter rowWriter = new ArrowPerRowBatchConverter(vsr, fieldWriters);
             rowWriter.reset(iterator);
             return rowWriter;

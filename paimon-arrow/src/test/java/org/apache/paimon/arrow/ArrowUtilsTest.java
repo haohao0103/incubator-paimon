@@ -35,6 +35,7 @@ public class ArrowUtilsTest {
 
     private static final Random RANDOM = new Random();
 
+    // 主要使用
     @Test
     public void testParquetFieldId() {
         Schema.Builder schemaBuilder = Schema.newBuilder();

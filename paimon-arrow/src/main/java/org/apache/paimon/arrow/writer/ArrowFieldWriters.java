@@ -63,6 +63,7 @@ import javax.annotation.Nullable;
 
 import java.math.BigDecimal;
 import java.time.ZoneId;
+import java.util.Arrays;
 
 /** Registry of {@link ArrowFieldWriter}s. */
 public class ArrowFieldWriters {
@@ -490,66 +491,96 @@ public class ArrowFieldWriters {
     /** Writer for ARRAY. */
     public static class ArrayWriter extends ArrowFieldWriter {
 
+        // 负责实际数组元素的写入(整型、字符串等具体类型)
         private final ArrowFieldWriter elementWriter;
 
+        // 记录当前写入位置的偏移量，适用于连续写入场景
         private int offset;
+
+        private int[] reusedLengthsBuffer;
 
         public ArrayWriter(FieldVector fieldVector, ArrowFieldWriter elementWriter) {
             super(fieldVector);
             this.elementWriter = elementWriter;
         }
 
+        // 重置写入状态
         @Override
         public void reset() {
             fieldVector.reset();
             offset = 0;
         }
 
+        /**
+         * 将数组类型的列数据写入到目标列表向量中
+         *
+         * @param columnVector 源数组列向量，包含需要写入的数组数据
+         * @param pickedInColumn 可选参数，表示列中需要被选取的行索引数组，null表示全选
+         * @param startIndex 当前批次数据的起始行索引
+         * @param batchRows 当前批次需要处理的总行数
+         */
         @Override
         protected void doWrite(
                 ColumnVector columnVector,
                 @Nullable int[] pickedInColumn,
                 int startIndex,
                 int batchRows) {
+            // 强制转换为数组列向量以访问数组特有方法
             ArrayColumnVector arrayColumnVector = (ArrayColumnVector) columnVector;
 
+            // 计算最大需要处理的数组长度索引
             int lenSize;
             if (pickedInColumn == null) {
                 lenSize = startIndex + batchRows;
             } else {
+                // 当存在行选择时，取最后一个被选元素的索引+1作为长度
                 lenSize = pickedInColumn[startIndex + batchRows - 1] + 1;
             }
 
-            // length for arrays in [0, startIndex + batchRows)
-            // TODO: reuse this
-            int[] lengths = new int[lenSize];
-            for (int i = 0; i < lenSize; i++) {
-                if (arrayColumnVector.isNullAt(i)) {
-                    // null values don't occupy space
-                    lengths[i] = 0;
-                } else {
-                    int size = arrayColumnVector.getArray(i).size();
-                    lengths[i] = size;
+            // 延迟初始化或扩容（核心改动点）
+            if (reusedLengthsBuffer == null || reusedLengthsBuffer.length < lenSize) {
+                int newCapacity = lenSize;
+                if (reusedLengthsBuffer != null) {
+                    newCapacity = Math.max(lenSize, (int) (reusedLengthsBuffer.length * 1.5));
                 }
+                reusedLengthsBuffer = new int[newCapacity];
+            }
+            // 初始化当前使用的区间
+            Arrays.fill(reusedLengthsBuffer, 0, lenSize, 0);
+
+            // 预计算每个数组元素的长度（包含null值处理）
+            // TODO: reuse this
+            //            int[] lengths = new int[lenSize];
+            for (int i = 0; i < lenSize; i++) {
+                if (!arrayColumnVector.isNullAt(i)) {
+                    reusedLengthsBuffer[i] = arrayColumnVector.getArray(i).size();
+                }
+                //                if (arrayColumnVector.isNullAt(i)) {
+                //                    lengths[i] = 0;
+                //                } else {
+                //                    lengths[i] = arrayColumnVector.getArray(i).size();
+                //                }
             }
 
+            // 获取数组子元素的写入信息并执行子元素写入
             ArrayChildWriteInfo arrayChildWriteInfo =
-                    getArrayChildWriteInfo(pickedInColumn, startIndex, lengths);
+                    getArrayChildWriteInfo(
+                            pickedInColumn, startIndex, reusedLengthsBuffer, lenSize);
             elementWriter.write(
                     arrayColumnVector.getColumnVector(),
                     arrayChildWriteInfo.pickedInColumn,
                     arrayChildWriteInfo.startIndex,
                     arrayChildWriteInfo.batchRows);
 
-            // set ListVector
+            // 更新列表向量元数据（起始偏移和长度）
             ListVector listVector = (ListVector) fieldVector;
             for (int i = 0; i < batchRows; i++) {
                 int row = getRowNumber(startIndex, i, pickedInColumn);
                 if (arrayColumnVector.isNullAt(row)) {
                     listVector.setNull(i);
                 } else {
-                    listVector.startNewValue(i);
-                    listVector.endValue(i, lengths[row]);
+                    listVector.startNewValue(i); // 设置当前行的起始位置
+                    listVector.endValue(i, reusedLengthsBuffer[row]); // 设置当前行的元素数量
                 }
             }
         }
@@ -575,6 +606,7 @@ public class ArrowFieldWriters {
         private final ArrowFieldWriter valueWriter;
 
         private int offset;
+        private int[] reusedLengthsBuffer;
 
         public MapWriter(
                 FieldVector fieldVector, ArrowFieldWriter keyWriter, ArrowFieldWriter valueWriter) {
@@ -604,21 +636,28 @@ public class ArrowFieldWriters {
                 lenSize = pickedInColumn[startIndex + batchRows - 1] + 1;
             }
 
+            // 延迟初始化或扩容
+            if (reusedLengthsBuffer == null || reusedLengthsBuffer.length < lenSize) {
+                int newCapacity = lenSize;
+                if (reusedLengthsBuffer != null) {
+                    newCapacity = Math.max(lenSize, (int) (reusedLengthsBuffer.length * 1.5));
+                }
+                reusedLengthsBuffer = new int[newCapacity];
+            }
+
+            Arrays.fill(reusedLengthsBuffer, 0, lenSize, 0);
             // length for arrays in [0, startIndex + batchRows)
             // TODO: reuse this
-            int[] lengths = new int[lenSize];
+            //            int[] lengths = new int[lenSize];
             for (int i = 0; i < lenSize; i++) {
-                if (mapColumnVector.isNullAt(i)) {
-                    // null values don't occupy space
-                    lengths[i] = 0;
-                } else {
-                    int size = mapColumnVector.getMap(i).size();
-                    lengths[i] = size;
+                if (!mapColumnVector.isNullAt(i)) {
+                    reusedLengthsBuffer[i] = mapColumnVector.getMap(i).size();
                 }
             }
 
             ArrayChildWriteInfo arrayChildWriteInfo =
-                    getArrayChildWriteInfo(pickedInColumn, startIndex, lengths);
+                    getArrayChildWriteInfo(
+                            pickedInColumn, startIndex, reusedLengthsBuffer, lenSize);
             keyWriter.write(
                     mapColumnVector.getChildren()[0],
                     arrayChildWriteInfo.pickedInColumn,
@@ -644,7 +683,7 @@ public class ArrowFieldWriters {
                     listVector.setNull(i);
                 } else {
                     listVector.startNewValue(i);
-                    listVector.endValue(i, lengths[row]);
+                    listVector.endValue(i, reusedLengthsBuffer[row]);
                 }
             }
         }
@@ -682,20 +721,23 @@ public class ArrowFieldWriters {
     }
 
     private static ArrayChildWriteInfo getArrayChildWriteInfo(
-            @Nullable int[] pickedInParentColumn, int parentStartIndex, int[] parentLengths) {
+            @Nullable int[] pickedInParentColumn,
+            int parentStartIndex,
+            int[] parentLengths,
+            int lenSize) {
         return pickedInParentColumn == null
-                ? getArrayChildWriteInfoWithoutDelete(parentStartIndex, parentLengths)
+                ? getArrayChildWriteInfoWithoutDelete(parentStartIndex, parentLengths, lenSize)
                 : getArrayChildWriteInfoWithDelete(
-                        pickedInParentColumn, parentStartIndex, parentLengths);
+                        pickedInParentColumn, parentStartIndex, parentLengths, lenSize);
     }
 
     private static ArrayChildWriteInfo getArrayChildWriteInfoWithoutDelete(
-            int parentStartIndex, int[] parentLengths) {
+            int parentStartIndex, int[] parentLengths, int lenSize) {
         // the first element index which is to be written
         int firstElementIndex = 0;
         // batchRows of child column vector
         int childBatchRows = 0;
-        for (int i = 0; i < parentLengths.length; i++) {
+        for (int i = 0; i < lenSize; i++) {
             if (i < parentStartIndex) {
                 firstElementIndex += parentLengths[i];
             } else {
@@ -706,14 +748,14 @@ public class ArrowFieldWriters {
     }
 
     private static ArrayChildWriteInfo getArrayChildWriteInfoWithDelete(
-            int[] pickedInParentColumn, int parentStartIndex, int[] parentLengths) {
+            int[] pickedInParentColumn, int parentStartIndex, int[] parentLengths, int lenSize) {
         // the first element index which is to be written
         int firstElementIndex = 0;
         // objects to calculate child pickedInColumn
         IntArrayList childPicked = new IntArrayList(1024);
         int offset = 0;
         int currentParentPickedIndex = parentStartIndex;
-        for (int i = 0; i < parentLengths.length; i++) {
+        for (int i = 0; i < lenSize; i++) {
             if (i < pickedInParentColumn[parentStartIndex]) {
                 firstElementIndex += parentLengths[i];
                 offset = firstElementIndex;

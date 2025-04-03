@@ -189,12 +189,22 @@ public class ArrowUtils {
         return new Field(fieldName, fieldType, children);
     }
 
+    /**
+     * 创建与指定VectorSchemaRoot和RowType对应的Arrow字段写入器数组。
+     *
+     * @param vectorSchemaRoot 包含目标字段向量的容器，提供底层数据存储
+     * @param rowType 定义字段逻辑类型和结构信息的行类型描述
+     * @return ArrowFieldWriter数组，每个元素对应rowType中的一个字段， 用于将数据写入对应的FieldVector
+     */
     public static ArrowFieldWriter[] createArrowFieldWriters(
             VectorSchemaRoot vectorSchemaRoot, RowType rowType) {
         ArrowFieldWriter[] fieldWriters = new ArrowFieldWriter[rowType.getFieldCount()];
         List<FieldVector> vectors = vectorSchemaRoot.getFieldVectors();
 
+        // 为每个字段类型创建对应的写入器
         for (int i = 0; i < rowType.getFieldCount(); i++) {
+            // 通过访问者模式根据字段类型创建对应的写入器工厂
+            // 并使用该工厂实例化具体的字段写入器
             fieldWriters[i] =
                     rowType.getTypeAt(i)
                             .accept(ArrowFieldWriterFactoryVisitor.INSTANCE)

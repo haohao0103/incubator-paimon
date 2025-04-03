@@ -28,6 +28,7 @@ import javax.annotation.Nullable;
 /** A reusable writer to convert a field into Arrow {@link FieldVector}. */
 public abstract class ArrowFieldWriter {
 
+    // 是一个数据载体的角色，本质是Arrow的FiledVector实例(ListVector/StructVector等)
     // reusable
     protected final FieldVector fieldVector;
 
@@ -54,8 +55,9 @@ public abstract class ArrowFieldWriter {
             @Nullable int[] pickedInColumn,
             int startIndex,
             int batchRows) {
+        // 子类实现具体写入逻辑
         doWrite(columnVector, pickedInColumn, startIndex, batchRows);
-        fieldVector.setValueCount(batchRows);
+        fieldVector.setValueCount(batchRows); // 设置数据有效长度
     }
 
     protected abstract void doWrite(
